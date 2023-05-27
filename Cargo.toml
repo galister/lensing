@@ -1,0 +1,14 @@
+[package]
+name = "lensing"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+ashpd = { version = "0.4.0", default-features = false, features = ["wayland", "pipewire", "async-std"] }
+futures = "0.3.28"
+gstreamer = "0.20.5"
+gstreamer-allocators = "0.20.0"
+gstreamer-app = "0.20.0"
+smithay-client-toolkit = "0.17.0"
