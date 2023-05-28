@@ -1,10 +1,9 @@
 use std::io::Cursor;
-use std::ptr::NonNull;
+use std::mem::MaybeUninit;
 
-use libspa_sys::spa_pod;
+use libspa_sys::{spa_pod, spa_video_info_raw};
 use pipewire::prelude::*;
 use pipewire::properties;
-use pipewire::spa::pod::deserialize::PodDeserializer;
 use pipewire::spa::pod::serialize::PodSerializer;
 use pipewire::spa::pod::{ChoiceValue, Object, Property, PropertyFlags, Value};
 use pipewire::spa::utils::{Choice, ChoiceFlags, Fraction, Rectangle};
@@ -42,33 +41,29 @@ struct DrmFormat {
     modifier: u64,
 }
 
-fn fourcc_to_spa_video_format(fourcc: u32) -> Option<u32> 
-{
+fn fourcc_to_spa_video_format(fourcc: u32) -> Option<u32> {
     match fourcc {
         //DRM_FORMAT_ARGB8888 (order on fourcc are reversed ARGB = BGRA)
-        0x34325241 => Some(libspa_sys::SPA_VIDEO_FORMAT_BGRA), 
+        0x34325241 => Some(libspa_sys::SPA_VIDEO_FORMAT_BGRA),
         //DRM_FORMAT_ABGR8888
-        0x34324241 => Some(libspa_sys::SPA_VIDEO_FORMAT_RGBA), 
+        0x34324241 => Some(libspa_sys::SPA_VIDEO_FORMAT_RGBA),
         //DRM_FORMAT_XRGB8888
-        0x34325258 => Some(libspa_sys::SPA_VIDEO_FORMAT_BGRx), 
+        0x34325258 => Some(libspa_sys::SPA_VIDEO_FORMAT_BGRx),
         //DRM_FORMAT_XBGR8888
-        0x34324258 => Some(libspa_sys::SPA_VIDEO_FORMAT_RGBx), 
-        _ => None
+        0x34324258 => Some(libspa_sys::SPA_VIDEO_FORMAT_RGBx),
+        _ => None,
     }
 }
 
-fn format_dmabuf_params() -> Vec<u8> 
-{
+fn format_dmabuf_params() -> Vec<u8> {
     let pod = Value::Object(Object {
         type_: libspa_sys::SPA_TYPE_OBJECT_ParamBuffers,
         id: libspa_sys::SPA_PARAM_Buffers,
-        properties: vec![
-            Property {
-                key: libspa_sys::SPA_PARAM_BUFFERS_dataType,
-                flags: PropertyFlags::empty(),
-                value: Value::Id(Id(libspa_sys::SPA_DATA_DmaBuf)),
-            },
-        ],
+        properties: vec![Property {
+            key: libspa_sys::SPA_PARAM_BUFFERS_dataType,
+            flags: PropertyFlags::empty(),
+            value: Value::Id(Id(libspa_sys::SPA_DATA_DmaBuf)),
+        }],
     });
     let (c, _) = PodSerializer::serialize(Cursor::new(Vec::new()), &pod).unwrap();
     c.into_inner()
@@ -142,7 +137,13 @@ fn format_get_params(format: u32, modifier: u64, fps: u32) -> Vec<u8> {
     c.into_inner()
 }
 
-fn pipewire_init_stream<F>(name: &str, node_id: u32, fps: u32, formats: Vec<DrmFormat>, on_frame: F) -> Result<(), Error>
+fn pipewire_init_stream<F>(
+    name: &str,
+    node_id: u32,
+    fps: u32,
+    formats: Vec<DrmFormat>,
+    on_frame: F,
+) -> Result<(), Error>
 where
     F: Fn(&PipewireFrameFormat, &Vec<PipewireDmabufPlane>),
 {
@@ -150,9 +151,16 @@ where
     let context = Context::new(&main_loop)?;
     let core = context.connect(None)?;
 
-    let mut format = PipewireFrameFormat { width: 0, height: 0, format: 0, modifier: 0 };
+    let mut format = PipewireFrameFormat {
+        width: 0,
+        height: 0,
+        format: 0,
+        modifier: 0,
+    };
 
-    let mut stream = Stream::<i32>::with_user_data(
+    let mut stream: Stream<i32>;
+
+    stream = Stream::<i32>::with_user_data(
         &main_loop,
         name,
         properties! {
@@ -165,21 +173,21 @@ where
     .param_changed(|_, id, param| {
         if param.is_null() || *id != libspa_sys::SPA_PARAM_Format as _ {
             return;
-        } 
+        }
+        let mut maybe_info = MaybeUninit::<spa_video_info_raw>::zeroed();
 
-        let ptr : NonNull<spa_pod> = NonNull::new(param as *mut _).unwrap();
-        let pod = unsafe { PodDeserializer::deserialize_ptr(ptr) };
-        
-        // TODO read format from pod
-        // Usually done via spa_format_video_raw_parse
+        unsafe {
+            libspa_sys::spa_format_video_raw_parse(param, maybe_info.as_mut_ptr());
+        }
 
-        format.width = 0; // format.info.raw.size.width
-        format.height = 0; // format.info.raw.size.height
-        format.format = 0; // format.info.raw.format
-        format.modifier = 0; // format.info.raw.modifier
-        
+        let info = unsafe { maybe_info.assume_init() };
+
+        format.width = info.size.width;
+        format.height = info.size.height;
+        format.format = info.format;
+        format.modifier = info.modifier;
+
         let params = format_dmabuf_params();
-        // TODO make stream available in here
         stream.update_params(&mut [params.as_ptr() as _]);
     })
     .state_changed(|old, new| {
@@ -210,10 +218,13 @@ where
     })
     .create()?;
 
-    let format_params: Vec<*const spa_pod> = formats.iter().filter_map(|f| {
-        let spa_video_format = fourcc_to_spa_video_format(f.code)?;
-        Some(format_get_params(spa_video_format, f.modifier, fps).as_ptr() as _)
-    }).collect();
+    let format_params: Vec<*const spa_pod> = formats
+        .iter()
+        .filter_map(|f| {
+            let spa_video_format = fourcc_to_spa_video_format(f.code)?;
+            Some(format_get_params(spa_video_format, f.modifier, fps).as_ptr() as _)
+        })
+        .collect();
 
     stream.connect(
         pipewire::spa::Direction::Input,
