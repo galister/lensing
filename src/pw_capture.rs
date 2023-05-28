@@ -208,7 +208,7 @@ where
             let planes: Vec<PipewireDmabufPlane> = datas
                 .iter()
                 .map(|p| PipewireDmabufPlane {
-                    fd: 0, // TODO https://gitlab.freedesktop.org/pipewire/pipewire-rs/-/blob/main/libspa/src/data.rs#L70
+                    fd: p.as_raw().fd as _,
                     offset: p.chunk().offset(),
                     stride: p.chunk().stride(),
                 })
