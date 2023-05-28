@@ -31,6 +31,8 @@ use smithay_client_toolkit::{
     },
 };
 
+mod pw_capture;
+
 fn main() {
     let proxy = block_on(Screencast::new()).unwrap();
     let session = block_on(proxy.create_session()).unwrap();
