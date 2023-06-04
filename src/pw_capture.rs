@@ -1,5 +1,7 @@
+use std::cell::RefCell;
 use std::io::Cursor;
 use std::mem::MaybeUninit;
+use std::rc::Rc;
 
 use libspa_sys::{spa_pod, spa_video_info_raw};
 use pipewire::prelude::*;
@@ -12,11 +14,11 @@ use pipewire::stream::{Stream, StreamFlags};
 use pipewire::{Context, Error, MainLoop};
 
 #[derive(Debug, Clone, Copy)]
-struct PipewireFrameFormat {
-    width: u32,
-    height: u32,
-    format: u32,
-    modifier: u64,
+pub struct PipewireFrameFormat {
+    pub width: u32,
+    pub height: u32,
+    pub format: u32,
+    pub modifier: u64,
 }
 
 impl PipewireFrameFormat {
@@ -29,16 +31,16 @@ impl PipewireFrameFormat {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct PipewireDmabufPlane {
-    fd: i32,
-    offset: u32,
-    stride: i32,
+pub struct PipewireDmabufPlane {
+    pub fd: i32,
+    pub offset: u32,
+    pub stride: i32,
 }
 
 #[derive(Debug, Clone, Copy)]
-struct DrmFormat {
-    code: u32,
-    modifier: u64,
+pub struct DrmFormat {
+    pub code: u32,
+    pub modifier: u64,
 }
 
 fn fourcc_to_spa_video_format(fourcc: u32) -> Option<u32> {
@@ -98,7 +100,7 @@ fn format_get_params(format: u32, modifier: u64, fps: u32) -> Vec<u8> {
                 key: libspa_sys::SPA_FORMAT_VIDEO_size,
                 flags: PropertyFlags::empty(),
                 value: Value::Choice(ChoiceValue::Rectangle(Choice(
-                    ChoiceFlags { bits: 0 },
+                    ChoiceFlags::from_bits_truncate(0),
                     ChoiceEnum::Range {
                         default: Rectangle {
                             width: 256,
@@ -119,7 +121,7 @@ fn format_get_params(format: u32, modifier: u64, fps: u32) -> Vec<u8> {
                 key: libspa_sys::SPA_FORMAT_VIDEO_framerate,
                 flags: PropertyFlags::empty(),
                 value: Value::Choice(ChoiceValue::Fraction(Choice(
-                    ChoiceFlags { bits: 0 },
+                    ChoiceFlags::from_bits_truncate(0),
                     ChoiceEnum::Range {
                         default: Fraction { num: fps, denom: 1 },
                         min: Fraction { num: 0, denom: 1 },
@@ -137,7 +139,7 @@ fn format_get_params(format: u32, modifier: u64, fps: u32) -> Vec<u8> {
     c.into_inner()
 }
 
-fn pipewire_init_stream<F>(
+pub fn pipewire_init_stream<F>(
     name: &str,
     node_id: u32,
     fps: u32,
@@ -145,22 +147,19 @@ fn pipewire_init_stream<F>(
     on_frame: F,
 ) -> Result<(), Error>
 where
-    F: Fn(&PipewireFrameFormat, &Vec<PipewireDmabufPlane>),
+    F: Fn(&PipewireFrameFormat, &Vec<PipewireDmabufPlane>) + 'static,
 {
     let main_loop = MainLoop::new()?;
     let context = Context::new(&main_loop)?;
-    let core = context.connect(None)?;
+    let _core = context.connect(None)?;
 
-    let mut format = PipewireFrameFormat {
-        width: 0,
-        height: 0,
-        format: 0,
-        modifier: 0,
-    };
+    let stream: Rc<RefCell<Option<Stream<i32>>>> = Rc::new(RefCell::new(None));
+    let stream_clone = stream.clone();
 
-    let mut stream: Stream<i32>;
+    let format: Rc<RefCell<Option<PipewireFrameFormat>>> = Rc::new(RefCell::new(None));
+    let format_clone = format.clone();
 
-    stream = Stream::<i32>::with_user_data(
+    let stream_inner = Stream::<i32>::with_user_data(
         &main_loop,
         name,
         properties! {
@@ -170,7 +169,7 @@ where
         },
         0,
     )
-    .param_changed(|_, id, param| {
+    .param_changed(move |_, id, param| {
         if param.is_null() || *id != libspa_sys::SPA_PARAM_Format as _ {
             return;
         }
@@ -182,27 +181,33 @@ where
 
         let info = unsafe { maybe_info.assume_init() };
 
-        format.width = info.size.width;
-        format.height = info.size.height;
-        format.format = info.format;
-        format.modifier = info.modifier;
+        let format = PipewireFrameFormat { 
+            width: info.size.width,
+            height: info.size.height,
+            format: info.format,
+            modifier: info.modifier,
+        };
+        format_clone.replace(Some(format));
 
         let params = format_dmabuf_params();
-        stream.update_params(&mut [params.as_ptr() as _]);
+
+        if let Some(ref stream) = *stream_clone.borrow() {
+            let _ = stream.update_params(&mut [params.as_ptr() as _]);
+        }
     })
     .state_changed(|old, new| {
         println!("Stream state changed: {:?} -> {:?}", old, new);
     })
-    .process(|stream, _| {
-        let maybe_buffer = None;
+    .process(move |stream, _| {
+        let mut maybe_buffer = None;
         // discard all but the freshest ingredients
         while let Some(buffer) = stream.dequeue_buffer() {
             maybe_buffer = Some(buffer);
         }
 
-        if let Some(buffer) = maybe_buffer {
+        if let Some(mut buffer) = maybe_buffer {
             let datas = buffer.datas_mut();
-            if datas.len() < 0 {
+            if datas.len() < 1 {
                 return;
             }
             let planes: Vec<PipewireDmabufPlane> = datas
@@ -213,12 +218,15 @@ where
                     stride: p.chunk().stride(),
                 })
                 .collect();
-            on_frame(&format, &planes);
+            
+            if let Some(ref format) = *format.borrow() {
+                on_frame(format, &planes);
+            }
         }
     })
     .create()?;
 
-    let format_params: Vec<*const spa_pod> = formats
+    let mut format_params: Vec<*const spa_pod> = formats
         .iter()
         .filter_map(|f| {
             let spa_video_format = fourcc_to_spa_video_format(f.code)?;
@@ -226,12 +234,17 @@ where
         })
         .collect();
 
-    stream.connect(
-        pipewire::spa::Direction::Input,
-        Some(node_id),
-        StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS,
-        format_params.as_mut_slice(),
-    );
+    stream.replace(Some(stream_inner));
+    
+    if let Some(ref stream_inner) = *stream.borrow() {
+        stream_inner.connect(
+            pipewire::spa::Direction::Input,
+            Some(node_id),
+            StreamFlags::AUTOCONNECT | StreamFlags::MAP_BUFFERS,
+            format_params.as_mut_slice(),
+        )?;
+    }
+
 
     main_loop.run();
     unsafe { pipewire::deinit() };
