@@ -36,11 +36,20 @@ mod pw_capture;
 mod wl_client_desktop;
 
 fn main() {
-
     let wl_desktop = WlClientDesktopState::new();
 
     for o in wl_desktop.outputs.iter() {
-        println!("{}: {} @ {}x{}, offset {}x{}, pixels {}x{}", o.name, o.model, o.logical_size.0, o.logical_size.1, o.logical_pos.0, o.logical_pos.1, o.size.0, o.size.1);
+        println!(
+            "{}: {} @ {}x{}, offset {}x{}, pixels {}x{}",
+            o.name,
+            o.model,
+            o.logical_size.0,
+            o.logical_size.1,
+            o.logical_pos.0,
+            o.logical_pos.1,
+            o.size.0,
+            o.size.1
+        );
     }
 }
 

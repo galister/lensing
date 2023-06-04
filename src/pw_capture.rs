@@ -181,7 +181,7 @@ where
 
         let info = unsafe { maybe_info.assume_init() };
 
-        let format = PipewireFrameFormat { 
+        let format = PipewireFrameFormat {
             width: info.size.width,
             height: info.size.height,
             format: info.format,
@@ -218,7 +218,7 @@ where
                     stride: p.chunk().stride(),
                 })
                 .collect();
-            
+
             if let Some(ref format) = *format.borrow() {
                 on_frame(format, &planes);
             }
@@ -235,7 +235,7 @@ where
         .collect();
 
     stream.replace(Some(stream_inner));
-    
+
     if let Some(ref stream_inner) = *stream.borrow() {
         stream_inner.connect(
             pipewire::spa::Direction::Input,
@@ -244,7 +244,6 @@ where
             format_params.as_mut_slice(),
         )?;
     }
-
 
     main_loop.run();
     unsafe { pipewire::deinit() };
